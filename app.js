@@ -6,27 +6,35 @@ const XLJS = require('x2js')
 const util = require('util')
 const prompts = require('prompts')
 const fs = require('fs')
-const fswrite = util.promisify(fs.writeFile)
-const fsappend = util.promisify(fs.appendFile)
 const path = require('path')
 const c = require('./constants')
 
 const xljs = new XLJS();
 
-(async function () {
-  let { depts, year, term, enrolments, filterSetting } = await prompts(c.prompt)
-
+/**
+ * The Course Section Generator scrapes the courses.students.ubc.ca website to
+ * get the sections for the specified year, term, and department codes.
+ * @param {object} options
+ * @param {string[]} options.depts What departments are you interested in?
+ * @param {number} options.year What year are you interested in?
+ * @param {'S' | 'W'} options.term What term are you interested in?
+ * @param {boolean} options.enrolments Do you care about enrolment? If you do, be warned that it will take a bit longer to generate this data
+ * @param {string[]} options.filterSetting What activities should be filtered out (not included)?
+ * @param {NodeJS.WritableStream} output
+ */
+async function courseSectionScraper(options, output) {
+  let { depts, year, term, enrolments, filterSetting } = options
   if (depts.includes('all')) {
     depts = c.prompt
-      .find(obj => obj.name === 'depts').choices
-      .filter(choice => choice.value !== 'all')
+      .find(obj => obj.name === 'depts')
+      .choices.filter(choice => choice.value !== 'all')
       .map(choice => choice.value)
   }
 
-  const filepath = path.join(__dirname, `/output/${year}${term}.csv`)
-
-  const writeHeader = header => fswrite(filepath, header + '\r\n')
-  const append = row => fsappend(filepath, row + '\r\n')
+  const write = util.promisify(output.write)
+  const end = util.promisify(output.end);
+  const writeHeader = header => write.call(output, header + '\r\n')
+  const append = row => write.call(output, row + '\r\n')
 
   const getCoursesInDept = async (dept, year, term) => {
     try {
@@ -80,12 +88,12 @@ const xljs = new XLJS();
   }
 
   try {
-    depts.forEach(async dept => {
-      enrolments ? await writeHeader(c.csvHeadersWithEnrolment) : await writeHeader(c.csvHeaders)
+    await writeHeader(enrolments ? c.csvHeadersWithEnrolment : c.csvHeaders)
+    await Promise.all(depts.map(async dept => {
       const courseObjs = await getCoursesInDept(dept, year, term)
-      courseObjs.forEach(async ({ course, description }) => {
+      await Promise.all(courseObjs.map(async ({ course }) => {
         const sections = await getSectionsInCourse(dept, course)
-        sections.forEach(async ({ instructor, activity, credits, section, termcd }) => {
+        await Promise.all(sections.map(async ({ instructor, activity, credits, section, termcd }) => {
           if (enrolments) {
             const {
               totalSeatsRemaining,
@@ -121,10 +129,26 @@ const xljs = new XLJS();
             ].map(x => JSON.stringify(x))
             await append(stringified)
           }
-        })
-      })
-    })
+        }))
+      }))
+    }))
+    end.call(output)
   } catch (e) {
     console.log(`Failed for the dept=${depts}, year=${year}, term=${term}`, e)
   }
-})()
+}
+
+if (require.main === module) {
+  (async function () {
+    const options = await prompts(c.prompt);
+
+    const filepath = path.join(
+      __dirname,
+      `/output/${options.year}${options.term}.csv`
+    );
+
+    await courseSectionScraper(options, fs.createWriteStream(filepath));
+  })();
+}
+
+module.exports = courseSectionScraper;
